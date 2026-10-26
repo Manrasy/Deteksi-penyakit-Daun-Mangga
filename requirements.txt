@@ -1,5 +1,5 @@
 streamlit
-tensorflow-cpu
-gdown
+pandas
 numpy
-pillow
+plotly
+openpyxl
