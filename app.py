@@ -1,236 +1,79 @@
-import streamlit as st
-import pandas as pd
+import cv2
+import joblib
 import numpy as np
-import plotly.express as px
-import plotly.graph_objects as go
+import pandas as pd
+import streamlit as st
+from PIL import Image
+from skimage.feature import graycomatrix, graycoprops
 
-# ==================================================
-# KONFIGURASI HALAMAN
-# ==================================================
+IMG_SIZE_FEAT = (300, 300)
 
-st.set_page_config(
-    page_title="Pemodelan Proporsi Guru MI",
-    page_icon="📊",
-    layout="wide"
-)
+st.set_page_config(page_title="Deteksi Penyakit Daun Mangga", page_icon="🥭")
 
-# ==================================================
-# CUSTOM CSS
-# ==================================================
 
-st.markdown("""
-<style>
+@st.cache_resource
+def load_artifacts():
+    clf = joblib.load("model/mlp_model.joblib")
+    scaler = joblib.load("model/scaler.joblib")
+    le = joblib.load("model/label_encoder.joblib")
+    cols = joblib.load("model/feature_cols.joblib")
+    return clf, scaler, le, cols
 
-.main{
-    background-color:#f8fafc;
-}
 
-[data-testid="stMetric"]{
-    background-color:white;
-    padding:20px;
-    border-radius:15px;
-    border-left:6px solid #2563eb;
-    box-shadow:0px 2px 10px rgba(0,0,0,0.1);
-}
+def extract_features(img_bgr):
+    """Harus identik dengan extract_handcrafted_features di notebook."""
+    img = cv2.resize(img_bgr, IMG_SIZE_FEAT)
+    rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-section[data-testid="stSidebar"]{
-    background-color:#0f172a;
-}
+    glcm = graycomatrix(gray, distances=[1], angles=[0], levels=256,
+                        symmetric=True, normed=True)
 
-section[data-testid="stSidebar"] *{
-    color:white;
-}
+    _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    area = perimeter = aspect_ratio = eccentricity = 0
+    if len(contours) > 0:
+        c = max(contours, key=cv2.contourArea)
+        area = cv2.contourArea(c)
+        perimeter = cv2.arcLength(c, True)
+        x, y, w, h = cv2.boundingRect(c)
+        aspect_ratio = float(w) / h if h != 0 else 0
+        m = cv2.moments(c)
+        den = (m['mu20'] + m['mu02']) ** 2
+        if den != 0:
+            val = ((m['mu20'] - m['mu02']) ** 2 - 4 * m['mu11'] ** 2) / den
+            eccentricity = np.sqrt(abs(val))
 
-h1,h2,h3{
-    color:#1e293b;
-}
+    return {
+        'R_Mean': rgb[:, :, 0].mean(), 'G_Mean': rgb[:, :, 1].mean(), 'B_Mean': rgb[:, :, 2].mean(),
+        'H_Mean': hsv[:, :, 0].mean(), 'S_Mean': hsv[:, :, 1].mean(), 'V_Mean': hsv[:, :, 2].mean(),
+        'Contrast': graycoprops(glcm, 'contrast')[0, 0],
+        'Dissimilarity': graycoprops(glcm, 'dissimilarity')[0, 0],
+        'Homogeneity': graycoprops(glcm, 'homogeneity')[0, 0],
+        'Energy': graycoprops(glcm, 'energy')[0, 0],
+        'Correlation': graycoprops(glcm, 'correlation')[0, 0],
+        'Area': area, 'Perimeter': perimeter,
+        'Aspect_Ratio': aspect_ratio, 'Eccentricity': eccentricity,
+    }
 
-</style>
-""", unsafe_allow_html=True)
 
-# ==================================================
-# LOAD DATA
-# ==================================================
+st.title("🥭 Deteksi Penyakit Daun Mangga")
+st.write("Unggah foto daun mangga, model akan memprediksi penyakitnya.")
 
-@st.cache_data
-def load_data():
-    return pd.read_excel(
-        "data/Hasil_Analisis_Guru_MI.xlsx"
-    )
+clf, scaler, le, cols = load_artifacts()
 
-df = load_data()
+file = st.file_uploader("Pilih gambar", type=["jpg", "jpeg", "png"])
+if file:
+    pil = Image.open(file).convert("RGB")
+    st.image(pil, caption="Gambar yang diunggah", use_container_width=True)
 
-# ==================================================
-# SIDEBAR
-# ==================================================
+    img_bgr = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
+    feats = pd.DataFrame([extract_features(img_bgr)])[cols]
+    proba = clf.predict_proba(scaler.transform(feats))[0]
 
-st.sidebar.title(
-    "📚 Menu Analisis"
-)
+    top = int(np.argmax(proba))
+    st.success(f"Prediksi: **{le.classes_[top]}** ({proba[top]*100:.1f}%)")
 
-menu = st.sidebar.radio(
-    "Pilih Menu",
-    [
-        "Dashboard",
-        "Visualisasi Data",
-        "Pemodelan Regresi",
-        "Simulasi Prediksi",
-        "Monitoring Distribusi",
-        "What-If Analysis",
-        "Analisis Gap",
-        "Klasifikasi",
-        "Laporan"
-    ]
-)
-
-# ==================================================
-# FILTER GLOBAL
-# ==================================================
-
-tahun_list = sorted(
-    df["Tahun"].unique()
-)
-
-kota_list = sorted(
-    df["Kota"].unique()
-)
-
-st.sidebar.markdown("---")
-
-tahun_filter = st.sidebar.selectbox(
-    "Filter Tahun",
-    options=["Semua"] + list(tahun_list)
-)
-
-kota_filter = st.sidebar.selectbox(
-    "Filter Kota",
-    options=["Semua"] + list(kota_list)
-)
-
-df_filter = df.copy()
-
-if tahun_filter != "Semua":
-    df_filter = df_filter[
-        df_filter["Tahun"] == tahun_filter
-    ]
-
-if kota_filter != "Semua":
-    df_filter = df_filter[
-        df_filter["Kota"] == kota_filter
-    ]
-
-# ==================================================
-# DASHBOARD
-# ==================================================
-
-if menu == "Dashboard":
-
-    st.title(
-        "📊 Dashboard Pendidikan MI Jawa Barat"
-    )
-
-    total_guru = int(
-        df_filter["Jumlah_Guru"].sum()
-    )
-
-    total_siswa = int(
-        df_filter["Jumlah_Siswa"].sum()
-    )
-
-    total_sekolah = int(
-        df_filter["Jumlah_Sekolah"].sum()
-    )
-
-    rata_rasio = round(
-        df_filter["Rasio_Siswa_Guru"].mean(),
-        2
-    )
-
-    col1,col2,col3,col4 = st.columns(4)
-
-    with col1:
-        st.metric(
-            "👨‍🏫 Total Guru",
-            f"{total_guru:,}"
-        )
-
-    with col2:
-        st.metric(
-            "🎓 Total Siswa",
-            f"{total_siswa:,}"
-        )
-
-    with col3:
-        st.metric(
-            "🏫 Total Sekolah",
-            f"{total_sekolah:,}"
-        )
-
-    with col4:
-        st.metric(
-            "📈 Rasio Siswa-Guru",
-            rata_rasio
-        )
-
-    st.markdown("---")
-
-    col1,col2 = st.columns(2)
-
-    with col1:
-
-        kondisi = (
-            df_filter["Kondisi"]
-            .value_counts()
-            .reset_index()
-        )
-
-        kondisi.columns = [
-            "Kondisi",
-            "Jumlah"
-        ]
-
-        fig = px.pie(
-            kondisi,
-            values="Jumlah",
-            names="Kondisi",
-            hole=0.4,
-            title="Distribusi Kondisi Guru"
-        )
-
-        st.plotly_chart(
-            fig,
-            use_container_width=True
-        )
-
-    with col2:
-
-        guru_tahun = (
-            df.groupby("Tahun")
-            ["Jumlah_Guru"]
-            .sum()
-            .reset_index()
-        )
-
-        fig = px.line(
-            guru_tahun,
-            x="Tahun",
-            y="Jumlah_Guru",
-            markers=True,
-            title="Perkembangan Jumlah Guru"
-        )
-
-        st.plotly_chart(
-            fig,
-            use_container_width=True
-        )
-
-    st.markdown("---")
-
-    st.subheader(
-        "Data Pendidikan MI"
-    )
-
-    st.dataframe(
-        df_filter,
-        use_container_width=True
-    )
+    st.subheader("Probabilitas semua kelas")
+    st.bar_chart(pd.Series(proba, index=le.classes_))
